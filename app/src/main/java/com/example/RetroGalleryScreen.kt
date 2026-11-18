@@ -374,6 +374,7 @@ private fun RetroMediaPagerViewer(
                                 val controller = MediaController(ctx)
                                 controller.setAnchorView(this)
                                 setMediaController(controller)
+                                tag = item.uri
                                 setVideoURI(item.uri)
                                 setOnPreparedListener { mp ->
                                     mp.isLooping = false
@@ -382,7 +383,10 @@ private fun RetroMediaPagerViewer(
                             }
                         },
                         update = { videoView ->
-                            videoView.setVideoURI(item.uri)
+                            if (videoView.tag != item.uri) {
+                                videoView.tag = item.uri
+                                videoView.setVideoURI(item.uri)
+                            }
                         },
                         modifier = Modifier
                             .fillMaxWidth()

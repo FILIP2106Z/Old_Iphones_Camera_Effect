@@ -3,11 +3,11 @@ package com.example
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.graphics.SurfaceTexture
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
-import android.view.TextureView
+import android.view.SurfaceHolder
+import android.view.SurfaceView
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -283,32 +283,30 @@ private fun CameraScreen(
                     ) {
                         AndroidView(
                             factory = { ctx ->
-                                TextureView(ctx).apply {
-                                    isOpaque = true
-                                    surfaceTextureListener = object : TextureView.SurfaceTextureListener {
-                                        override fun onSurfaceTextureAvailable(
-                                            surface: SurfaceTexture,
-                                            width: Int,
-                                            height: Int,
-                                        ) {
-                                            viewModel.attachPreviewSurface(surface, width, height)
+                                SurfaceView(ctx).apply {
+                                    holder.addCallback(object : SurfaceHolder.Callback {
+                                        override fun surfaceCreated(holder: SurfaceHolder) {
+                                            val frame = holder.surfaceFrame
+                                            viewModel.attachPreviewSurface(
+                                                holder.surface,
+                                                frame.width().coerceAtLeast(1),
+                                                frame.height().coerceAtLeast(1),
+                                            )
                                         }
 
-                                        override fun onSurfaceTextureSizeChanged(
-                                            surface: SurfaceTexture,
+                                        override fun surfaceChanged(
+                                            holder: SurfaceHolder,
+                                            format: Int,
                                             width: Int,
                                             height: Int,
                                         ) {
                                             viewModel.updatePreviewSize(width, height)
                                         }
 
-                                        override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
+                                        override fun surfaceDestroyed(holder: SurfaceHolder) {
                                             viewModel.detachPreviewSurface()
-                                            return true
                                         }
-
-                                        override fun onSurfaceTextureUpdated(surface: SurfaceTexture) = Unit
-                                    }
+                                    })
                                 }
                             },
                             modifier = Modifier.fillMaxSize(),

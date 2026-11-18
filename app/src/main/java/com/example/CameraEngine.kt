@@ -37,6 +37,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.nio.ByteBuffer
 import java.util.concurrent.ExecutorService
@@ -166,11 +167,13 @@ class CameraEngine(
         shaderRenderer.capturePhoto2048x1536 { bitmap ->
             deferred.complete(bitmap)
         }
-        val capturedBitmap = deferred.await()
+        val capturedBitmap = withTimeoutOrNull(2500L) { deferred.await() }
 
         if (shouldFlash && cam != null) {
             cam.cameraControl.enableTorch(false)
         }
+
+        if (capturedBitmap == null) return@withContext null
 
         val savedItem = repository.saveJpeg2048x1536WithExif(capturedBitmap)
         if (savedItem != null) {
@@ -251,13 +254,22 @@ class CameraEngine(
         val owner = lifecycleOwner ?: return
         val st = cameraSurfaceTexture ?: return
 
-        val selector = if (currentFacing == CameraFacing.FRONT &&
-            runCatching { provider.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA) }.getOrDefault(false)
-        ) {
-            CameraSelector.DEFAULT_FRONT_CAMERA
-        } else {
-            currentFacing = CameraFacing.BACK
-            CameraSelector.DEFAULT_BACK_CAMERA
+        val hasFront = runCatching { provider.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA) }.getOrDefault(false)
+        val hasBack = runCatching { provider.hasCamera(CameraSelector.DEFAULT_BACK_CAMERA) }.getOrDefault(false)
+        val selector = when {
+            currentFacing == CameraFacing.FRONT && hasFront -> CameraSelector.DEFAULT_FRONT_CAMERA
+            hasBack -> {
+                currentFacing = CameraFacing.BACK
+                CameraSelector.DEFAULT_BACK_CAMERA
+            }
+            hasFront -> {
+                currentFacing = CameraFacing.FRONT
+                CameraSelector.DEFAULT_FRONT_CAMERA
+            }
+            else -> {
+                onError("No camera hardware available")
+                return
+            }
         }
 
         val resolutionSelector = ResolutionSelector.Builder()

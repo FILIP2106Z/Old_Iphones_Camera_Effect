@@ -80,8 +80,8 @@ class RetroCameraViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
-    fun attachPreviewSurface(surfaceTexture: SurfaceTexture, width: Int, height: Int) {
-        shaderRenderer.attachPreviewSurface(surfaceTexture, width, height)
+    fun attachPreviewSurface(surface: Any, width: Int, height: Int) {
+        shaderRenderer.attachPreviewSurface(surface, width, height)
     }
 
     fun updatePreviewSize(width: Int, height: Int) {
@@ -89,7 +89,7 @@ class RetroCameraViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun detachPreviewSurface() {
-        shaderRenderer.detachPreviewSurface()
+        shaderRenderer.detachPreviewSurfaceSync()
     }
 
     fun toggleMode(targetMode: CaptureMode) {

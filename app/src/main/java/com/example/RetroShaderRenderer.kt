@@ -17,12 +17,14 @@ import android.view.Surface
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.math.max
 
 /**
  * OpenGL ES 2.0 / 3.0 real-time shader pipeline emulating the 2009 OmniVision OV3642 3MP CMOS sensor.
  * Renders CameraX OES SurfaceTexture frames simultaneously to:
- * 1. Live viewfinder SurfaceTexture (TextureView)
+ * 1. Live viewfinder Surface (SurfaceView)
  * 2. Offscreen 2048x1536 FBO for 3.1 MP JPEG capture
  * 3. MediaCodec input Surface for 640x480 30FPS H.264 video recording
  */
@@ -52,7 +54,6 @@ class RetroShaderRenderer(
                 if (uFlipY > 0.5) {
                     uv.y = 1.0 - uv.y;
                 }
-                // Apply digital zoom and 4:3 aspect ratio crop around center
                 vec2 centered = (uv - 0.5) * uAspectCrop / max(uZoom, 1.0) + 0.5;
                 vRawUv = centered;
                 vec4 transformed = uStMatrix * vec4(centered, 0.0, 1.0);
@@ -112,7 +113,6 @@ class RetroShaderRenderer(
 
                 // 2. Dynamic Range Compression & Highlight Clipping
                 float luma = luminance(baseColor);
-                // S-curve contrast boost
                 vec3 mapped = clamp((baseColor - 0.5) * 1.26 + 0.5, 0.0, 1.0);
 
                 // Crush shadow detail below 0.12 luminance
@@ -127,7 +127,6 @@ class RetroShaderRenderer(
                 float clipWhite = smoothstep(0.74, 0.79, luma);
                 mapped = mix(mapped, vec3(1.0), clipWhite);
 
-                // Add optical halation glow
                 mapped = clamp(mapped + halation, 0.0, 1.0);
 
                 // 3. 2009 White Balance & Color Matrix: warm creamy/yellowish-green midtones
@@ -136,7 +135,6 @@ class RetroShaderRenderer(
                 vec3 colorTint = mix(vec3(1.02, 1.01, 0.93), vec3(1.06, 1.02, 0.88), midtoneWeight);
                 mapped *= colorTint;
 
-                // Slightly reduced saturation in shadows, lively midtones
                 float sat = mix(0.64, 1.08, smoothstep(0.06, 0.38, postLuma));
                 mapped = mix(vec3(luminance(mapped)), mapped, sat);
 
@@ -149,7 +147,6 @@ class RetroShaderRenderer(
                 float nB = hash12(noiseCell + vec2(tSeed * 3.7, 91.3)) - 0.5;
                 mapped += vec3(nR, nG, nB) * 0.11 * darkNoiseMask;
 
-                // Subtle 2009 edge vignette
                 float vignette = 1.0 - dot(radial, radial) * 0.28;
                 mapped *= clamp(vignette, 0.78, 1.0);
 
@@ -178,6 +175,7 @@ class RetroShaderRenderer(
     private var eglDisplay: EGLDisplay = EGL14.EGL_NO_DISPLAY
     private var eglContext: EGLContext = EGL14.EGL_NO_CONTEXT
     private var eglConfig: EGLConfig? = null
+    private var pbufferSurface: EGLSurface = EGL14.EGL_NO_SURFACE
 
     private var previewSurface: EGLSurface = EGL14.EGL_NO_SURFACE
     private var previewWidth: Int = 640
@@ -187,6 +185,8 @@ class RetroShaderRenderer(
 
     private var cameraOesTexId: Int = 0
     private var cameraSurfaceTexture: SurfaceTexture? = null
+    private var hasCameraFrame = false
+    private var frameCount = 0
 
     private var programId: Int = 0
     private var aPositionLoc: Int = -1
@@ -221,6 +221,8 @@ class RetroShaderRenderer(
 
     private var pendingPhotoCallback: ((Bitmap) -> Unit)? = null
     private var startTimeNs: Long = System.nanoTime()
+
+    @Volatile
     private var isReleased = false
 
     fun start() {
@@ -245,50 +247,73 @@ class RetroShaderRenderer(
 
     fun getEstimatedSceneLuma(): Float = lastEstimatedLuma
 
-    fun attachPreviewSurface(surfaceTexture: SurfaceTexture, width: Int, height: Int) {
+    fun attachPreviewSurface(surface: Any, width: Int, height: Int) {
         glHandler?.post {
-            if (isReleased || eglDisplay == EGL14.EGL_NO_DISPLAY) return@post
+            if (isReleased || eglDisplay == EGL14.EGL_NO_DISPLAY || eglConfig == null) return@post
             destroyPreviewSurface()
             previewWidth = max(1, width)
             previewHeight = max(1, height)
             val attribs = intArrayOf(EGL14.EGL_NONE)
-            previewSurface = EGL14.eglCreateWindowSurface(
-                eglDisplay,
-                eglConfig,
-                surfaceTexture,
-                attribs,
-                0,
-            )
-            if (previewSurface != EGL14.EGL_NO_SURFACE) {
-                makeCurrent(previewSurface)
-                drawCurrentFrameToSurface(previewSurface, previewWidth, previewHeight, flipY = false)
-            }
-        }
-    }
-
-    fun updatePreviewSize(width: Int, height: Int) {
-        previewWidth = max(1, width)
-        previewHeight = max(1, height)
-    }
-
-    fun detachPreviewSurface() {
-        glHandler?.post {
-            destroyPreviewSurface()
-        }
-    }
-
-    fun attachEncoderSurface(surface: Surface) {
-        glHandler?.post {
-            if (isReleased || eglDisplay == EGL14.EGL_NO_DISPLAY) return@post
-            destroyEncoderSurface()
-            val attribs = intArrayOf(EGL14.EGL_NONE)
-            encoderSurface = EGL14.eglCreateWindowSurface(
+            val created = EGL14.eglCreateWindowSurface(
                 eglDisplay,
                 eglConfig,
                 surface,
                 attribs,
                 0,
             )
+            if (created != null && created != EGL14.EGL_NO_SURFACE) {
+                previewSurface = created
+                makeCurrent(previewSurface)
+                if (hasCameraFrame) {
+                    drawCurrentFrameToSurface(previewSurface, previewWidth, previewHeight, flipY = false)
+                } else {
+                    clearSurface(previewSurface, previewWidth, previewHeight)
+                }
+            }
+        }
+    }
+
+    fun updatePreviewSize(width: Int, height: Int) {
+        glHandler?.post {
+            previewWidth = max(1, width)
+            previewHeight = max(1, height)
+            if (previewSurface != EGL14.EGL_NO_SURFACE) {
+                if (hasCameraFrame) {
+                    drawCurrentFrameToSurface(previewSurface, previewWidth, previewHeight, flipY = false)
+                } else {
+                    clearSurface(previewSurface, previewWidth, previewHeight)
+                }
+            }
+        }
+    }
+
+    fun detachPreviewSurfaceSync() {
+        val handler = glHandler ?: return
+        val latch = CountDownLatch(1)
+        val posted = handler.post {
+            destroyPreviewSurface()
+            latch.countDown()
+        }
+        if (posted) {
+            runCatching { latch.await(400, TimeUnit.MILLISECONDS) }
+        }
+    }
+
+    fun attachEncoderSurface(surface: Surface) {
+        glHandler?.post {
+            if (isReleased || eglDisplay == EGL14.EGL_NO_DISPLAY || eglConfig == null) return@post
+            destroyEncoderSurface()
+            val attribs = intArrayOf(EGL14.EGL_NONE)
+            val created = EGL14.eglCreateWindowSurface(
+                eglDisplay,
+                eglConfig,
+                surface,
+                attribs,
+                0,
+            )
+            if (created != null && created != EGL14.EGL_NO_SURFACE) {
+                encoderSurface = created
+            }
         }
     }
 
@@ -302,10 +327,7 @@ class RetroShaderRenderer(
         glHandler?.post {
             if (isReleased) return@post
             pendingPhotoCallback = onCaptured
-            // If camera stream is paused/emulator idle, render immediately from current OES texture
-            if (cameraSurfaceTexture != null) {
-                renderPhotoToFboAndDeliver()
-            }
+            renderPhotoToFboAndDeliver()
         }
     }
 
@@ -316,6 +338,11 @@ class RetroShaderRenderer(
             destroyEncoderSurface()
             destroyPreviewSurface()
             destroyPhotoFbo()
+            unbindCurrentContext()
+            if (pbufferSurface != EGL14.EGL_NO_SURFACE) {
+                EGL14.eglDestroySurface(eglDisplay, pbufferSurface)
+                pbufferSurface = EGL14.EGL_NO_SURFACE
+            }
             cameraSurfaceTexture?.setOnFrameAvailableListener(null)
             cameraSurfaceTexture?.release()
             cameraSurfaceTexture = null
@@ -328,12 +355,6 @@ class RetroShaderRenderer(
                 programId = 0
             }
             if (eglDisplay != EGL14.EGL_NO_DISPLAY) {
-                EGL14.eglMakeCurrent(
-                    eglDisplay,
-                    EGL14.EGL_NO_SURFACE,
-                    EGL14.EGL_NO_SURFACE,
-                    EGL14.EGL_NO_CONTEXT,
-                )
                 if (eglContext != EGL14.EGL_NO_CONTEXT) {
                     EGL14.eglDestroyContext(eglDisplay, eglContext)
                 }
@@ -350,20 +371,25 @@ class RetroShaderRenderer(
     private fun initGl() {
         eglDisplay = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
         val version = IntArray(2)
-        EGL14.eglInitialize(eglDisplay, version, 0, version, 1)
+        if (!EGL14.eglInitialize(eglDisplay, version, 0, version, 1)) {
+            return
+        }
 
-        eglConfig = chooseConfig(recordable = true) ?: chooseConfig(recordable = false)
+        eglConfig = chooseConfig(recordable = true) ?: chooseConfig(recordable = false) ?: return
         val ctxAttribs = intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE)
         eglContext = EGL14.eglCreateContext(eglDisplay, eglConfig, EGL14.EGL_NO_CONTEXT, ctxAttribs, 0)
+        if (eglContext == EGL14.EGL_NO_CONTEXT) return
 
-        // Create temporary 1x1 pbuffer so we can compile shaders & OES texture immediately
-        val pbuffer = EGL14.eglCreatePbufferSurface(
+        // Persistent 1x1 pbuffer fallback surface so offscreen FBO captures always have a valid surface
+        pbufferSurface = EGL14.eglCreatePbufferSurface(
             eglDisplay,
             eglConfig,
             intArrayOf(EGL14.EGL_WIDTH, 1, EGL14.EGL_HEIGHT, 1, EGL14.EGL_NONE),
             0,
         )
-        makeCurrent(pbuffer)
+        if (pbufferSurface == EGL14.EGL_NO_SURFACE || !makeCurrent(pbufferSurface)) {
+            return
+        }
 
         programId = createProgram(VERTEX_SHADER, FRAGMENT_SHADER)
         aPositionLoc = GLES20.glGetAttribLocation(programId, "aPosition")
@@ -392,30 +418,26 @@ class RetroShaderRenderer(
         }, glHandler)
         cameraSurfaceTexture = st
 
-        EGL14.eglDestroySurface(eglDisplay, pbuffer)
         onCameraSurfaceTextureReady(st)
     }
 
     private fun onFrameAvailable(st: SurfaceTexture) {
-        if (previewSurface == EGL14.EGL_NO_SURFACE && encoderSurface == EGL14.EGL_NO_SURFACE && pendingPhotoCallback == null) {
-            return
-        }
-        val activeSurface = when {
-            previewSurface != EGL14.EGL_NO_SURFACE -> previewSurface
-            encoderSurface != EGL14.EGL_NO_SURFACE -> encoderSurface
-            else -> return
-        }
-        makeCurrent(activeSurface)
+        val activeSurface = validSurfaceOrFallback() ?: return
+        if (!makeCurrent(activeSurface)) return
+
         st.updateTexImage()
         st.getTransformMatrix(stMatrix)
+        hasCameraFrame = true
+        frameCount++
 
         if (previewSurface != EGL14.EGL_NO_SURFACE) {
             drawCurrentFrameToSurface(previewSurface, previewWidth, previewHeight, flipY = false)
-            sampleCenterLumaRough()
+            if (frameCount % 15 == 0) {
+                sampleCenterLumaRough()
+            }
         }
 
-        if (encoderSurface != EGL14.EGL_NO_SURFACE) {
-            makeCurrent(encoderSurface)
+        if (encoderSurface != EGL14.EGL_NO_SURFACE && makeCurrent(encoderSurface)) {
             drawQuad(VIDEO_WIDTH, VIDEO_HEIGHT, flipY = false)
             EGLExt.eglPresentationTimeANDROID(eglDisplay, encoderSurface, st.timestamp)
             EGL14.eglSwapBuffers(eglDisplay, encoderSurface)
@@ -430,16 +452,21 @@ class RetroShaderRenderer(
         val callback = pendingPhotoCallback ?: return
         pendingPhotoCallback = null
 
-        ensurePhotoFbo()
-        val surfaceToBind = when {
-            previewSurface != EGL14.EGL_NO_SURFACE -> previewSurface
-            encoderSurface != EGL14.EGL_NO_SURFACE -> encoderSurface
-            else -> return
+        val surfaceToBind = validSurfaceOrFallback()
+        if (surfaceToBind == null || !makeCurrent(surfaceToBind)) {
+            callback(Bitmap.createBitmap(PHOTO_WIDTH, PHOTO_HEIGHT, Bitmap.Config.ARGB_8888))
+            return
         }
-        makeCurrent(surfaceToBind)
 
+        ensurePhotoFbo()
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, photoFboId)
-        drawQuad(PHOTO_WIDTH, PHOTO_HEIGHT, flipY = true)
+        if (hasCameraFrame) {
+            drawQuad(PHOTO_WIDTH, PHOTO_HEIGHT, flipY = true)
+        } else {
+            GLES20.glViewport(0, 0, PHOTO_WIDTH, PHOTO_HEIGHT)
+            GLES20.glClearColor(0.067f, 0.071f, 0.078f, 1f)
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+        }
 
         val pixelBuffer = ByteBuffer.allocateDirect(PHOTO_WIDTH * PHOTO_HEIGHT * 4)
             .order(ByteOrder.LITTLE_ENDIAN)
@@ -460,13 +487,21 @@ class RetroShaderRenderer(
         callback(bitmap)
     }
 
+    private fun clearSurface(surface: EGLSurface, width: Int, height: Int) {
+        if (!makeCurrent(surface)) return
+        GLES20.glViewport(0, 0, width, height)
+        GLES20.glClearColor(0.067f, 0.071f, 0.078f, 1f)
+        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+        EGL14.eglSwapBuffers(eglDisplay, surface)
+    }
+
     private fun drawCurrentFrameToSurface(
         surface: EGLSurface,
         width: Int,
         height: Int,
         flipY: Boolean,
     ) {
-        makeCurrent(surface)
+        if (!makeCurrent(surface)) return
         drawQuad(width, height, flipY)
         EGL14.eglSwapBuffers(eglDisplay, surface)
     }
@@ -485,7 +520,6 @@ class RetroShaderRenderer(
         GLES20.glUniform1f(uFlipYLoc, if (flipY) 1f else 0f)
         GLES20.glUniform1f(uZoomLoc, shaderZoom)
 
-        // Compute center-crop ratio to ensure authentic 4:3 output even if sensor delivers 16:9
         val targetAspect = targetWidth.toFloat() / targetHeight.toFloat()
         val streamAspect = streamWidth.toFloat() / streamHeight.toFloat()
         val cropX = if (streamAspect > targetAspect) targetAspect / streamAspect else 1.0f
@@ -576,6 +610,7 @@ class RetroShaderRenderer(
 
     private fun destroyPreviewSurface() {
         if (previewSurface != EGL14.EGL_NO_SURFACE) {
+            unbindCurrentContext()
             EGL14.eglDestroySurface(eglDisplay, previewSurface)
             previewSurface = EGL14.EGL_NO_SURFACE
         }
@@ -583,17 +618,42 @@ class RetroShaderRenderer(
 
     private fun destroyEncoderSurface() {
         if (encoderSurface != EGL14.EGL_NO_SURFACE) {
+            unbindCurrentContext()
             EGL14.eglDestroySurface(eglDisplay, encoderSurface)
             encoderSurface = EGL14.EGL_NO_SURFACE
         }
     }
 
-    private fun makeCurrent(surface: EGLSurface) {
-        EGL14.eglMakeCurrent(eglDisplay, surface, surface, eglContext)
+    private fun validSurfaceOrFallback(): EGLSurface? {
+        return when {
+            previewSurface != EGL14.EGL_NO_SURFACE -> previewSurface
+            encoderSurface != EGL14.EGL_NO_SURFACE -> encoderSurface
+            pbufferSurface != EGL14.EGL_NO_SURFACE -> pbufferSurface
+            else -> null
+        }
+    }
+
+    private fun unbindCurrentContext() {
+        if (eglDisplay != EGL14.EGL_NO_DISPLAY) {
+            EGL14.eglMakeCurrent(
+                eglDisplay,
+                EGL14.EGL_NO_SURFACE,
+                EGL14.EGL_NO_SURFACE,
+                EGL14.EGL_NO_CONTEXT,
+            )
+        }
+    }
+
+    private fun makeCurrent(surface: EGLSurface): Boolean {
+        if (eglDisplay == EGL14.EGL_NO_DISPLAY || eglContext == EGL14.EGL_NO_CONTEXT || surface == EGL14.EGL_NO_SURFACE) {
+            return false
+        }
+        return EGL14.eglMakeCurrent(eglDisplay, surface, surface, eglContext)
     }
 
     private fun chooseConfig(recordable: Boolean): EGLConfig? {
         val attribList = mutableListOf(
+            EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT or EGL14.EGL_PBUFFER_BIT,
             EGL14.EGL_RED_SIZE, 8,
             EGL14.EGL_GREEN_SIZE, 8,
             EGL14.EGL_BLUE_SIZE, 8,
