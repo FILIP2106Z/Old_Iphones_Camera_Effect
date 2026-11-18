@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="retro_graphite">#FF111214</color>
+    <color name="retro_silver_dark">#FF1D1F22</color>
+    <color name="retro_amber_gold">#FFF5C518</color>
+    <color name="retro_crimson">#FFE52521</color>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+</resources>

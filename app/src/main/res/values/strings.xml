@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Retro3GS Cam</string>
+    <string name="permission_title">Retro3GS Camera Access</string>
+    <string name="permission_body">Retro3GS Cam needs access to your Camera to run the 2009 OV3642 viewfinder pipeline, and Microphone access to record 640x480 audio with your videos.</string>
+    <string name="permission_grant_button">Enable Camera</string>
+    <string name="permission_settings_button">Open App Settings</string>
+    <string name="flash_auto">Auto</string>
+    <string name="flash_on">On</string>
+    <string name="flash_off">Off</string>
+    <string name="cd_flash_button">Cycle flash mode</string>
+    <string name="cd_flip_camera">Switch front or rear camera</string>
+    <string name="cd_shutter_photo">Take photo</string>
+    <string name="cd_shutter_video_start">Start video recording</string>
+    <string name="cd_shutter_video_stop">Stop video recording</string>
+    <string name="cd_mode_switch">Switch between Photo and Video mode</string>
+    <string name="cd_gallery_thumbnail">Open Camera Roll preview</string>
+    <string name="cd_focus_reticle">Tap to focus area</string>
+    <string name="gallery_title">Camera Roll</string>
+    <string name="gallery_back_camera">Camera</string>
+    <string name="gallery_empty_title">No Photos or Videos</string>
+    <string name="gallery_empty_subtitle">Capture moments with the 2009 3.1 MP camera or 640x480 video recorder to fill your Camera Roll.</string>
+    <string name="viewer_exif_title">iPhone 3GS EXIF</string>
+    <string name="viewer_share">Share</string>
+    <string name="viewer_delete">Delete</string>
+    <string name="viewer_delete_confirm_title">Delete from Camera Roll?</string>
+    <string name="viewer_delete_confirm_body">This retro capture will be permanently removed from your device gallery.</string>
+    <string name="viewer_delete_confirm_action">Delete</string>
+    <string name="viewer_cancel">Cancel</string>
+    <string name="camera_unavailable">Camera hardware unavailable on this device</string>
+</resources>

@@ -1,0 +1,6 @@
+{
+  "name": "Retro3GS Cam",
+  "description": "2009 iPhone 3GS skeuomorphic camera and retro Camera Roll powered by CameraX, Camera2Interop, and a real-time OpenGL ES OV3642 shader pipeline.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
