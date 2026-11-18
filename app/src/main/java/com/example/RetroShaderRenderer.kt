@@ -81,74 +81,88 @@ class RetroShaderRenderer(
                 return fract((p3.x + p3.y) * p3.z);
             }
 
-            void main() {
-                // 1. Resolution Downsampling: virtual 640x480 grid hybrid nearest/bilinear interpolation
-                vec2 virtualGrid = vec2(640.0, 480.0);
-                vec2 snappedUv = (floor(vTexCoord * virtualGrid) + 0.5) / virtualGrid;
-                vec2 sampleUv = mix(vTexCoord, snappedUv, 0.65);
+            vec3 sampleClamped(vec2 uv) {
+                return texture2D(sTexture, clamp(uv, 0.001, 0.999)).rgb;
+            }
 
-                // Subtle single-element plastic lens chromatic fringe toward outer corners
+            void main() {
+                // 1. Authentic 2009 3.1MP Plastic/Glass f/2.8 Optical Softness (smooth MTF rolloff, zero blocky aliasing)
+                vec2 opticalStep = vec2(1.0 / 960.0, 1.0 / 720.0) * 1.25;
                 vec2 radial = vRawUv - 0.5;
                 float edgeDist = dot(radial, radial);
-                vec2 chromaOffset = radial * edgeDist * 0.0045;
+                vec2 chromaShift = radial * edgeDist * 0.0028;
 
-                float r = texture2D(sTexture, clamp(sampleUv + chromaOffset, 0.0, 1.0)).r;
-                float g = texture2D(sTexture, clamp(sampleUv, 0.0, 1.0)).g;
-                float b = texture2D(sTexture, clamp(sampleUv - chromaOffset, 0.0, 1.0)).b;
-                vec3 baseColor = vec3(r, g, b);
+                vec3 cCenter = sampleClamped(vTexCoord);
+                vec3 cN = sampleClamped(vTexCoord + vec2(0.0, opticalStep.y));
+                vec3 cS = sampleClamped(vTexCoord - vec2(0.0, opticalStep.y));
+                vec3 cE = sampleClamped(vTexCoord + vec2(opticalStep.x, 0.0));
+                vec3 cW = sampleClamped(vTexCoord - vec2(opticalStep.x, 0.0));
 
-                // 4. Lightweight 5-tap thresholded optical halation / bloom (> 0.85 luma)
-                vec2 stepUv = max(uTexelStep, vec2(1.0 / 640.0, 1.0 / 480.0)) * 2.4;
-                vec3 tap1 = texture2D(sTexture, clamp(sampleUv + vec2( stepUv.x,  stepUv.y), 0.0, 1.0)).rgb;
-                vec3 tap2 = texture2D(sTexture, clamp(sampleUv + vec2(-stepUv.x,  stepUv.y), 0.0, 1.0)).rgb;
-                vec3 tap3 = texture2D(sTexture, clamp(sampleUv + vec2( stepUv.x, -stepUv.y), 0.0, 1.0)).rgb;
-                vec3 tap4 = texture2D(sTexture, clamp(sampleUv + vec2(-stepUv.x, -stepUv.y), 0.0, 1.0)).rgb;
+                vec3 softColor = cCenter * 0.44 + (cN + cS + cE + cW) * 0.14;
+                // Subtle lateral chromatic aberration on outer edges
+                softColor.r = mix(softColor.r, sampleClamped(vTexCoord + chromaShift).r, 0.45);
+                softColor.b = mix(softColor.b, sampleClamped(vTexCoord - chromaShift).b, 0.45);
 
-                vec3 bloomAccum = max(baseColor - 0.85, 0.0)
-                    + max(tap1 - 0.85, 0.0)
-                    + max(tap2 - 0.85, 0.0)
-                    + max(tap3 - 0.85, 0.0)
-                    + max(tap4 - 0.85, 0.0);
-                vec3 halation = bloomAccum * vec3(1.12, 1.04, 0.94) * 0.68;
+                // 2. Soft Atmospheric Veiling Glare / Halation around bright sky & highlights (wide, gentle, creamy-white)
+                vec2 glareStep = vec2(1.0 / 320.0, 1.0 / 240.0) * 3.2;
+                vec3 g1 = sampleClamped(vTexCoord + vec2( glareStep.x,  glareStep.y));
+                vec3 g2 = sampleClamped(vTexCoord + vec2(-glareStep.x,  glareStep.y));
+                vec3 g3 = sampleClamped(vTexCoord + vec2( glareStep.x, -glareStep.y));
+                vec3 g4 = sampleClamped(vTexCoord + vec2(-glareStep.x, -glareStep.y));
+                vec3 glareAvg = (g1 + g2 + g3 + g4) * 0.25;
+                float glareWeight = smoothstep(0.70, 0.98, luminance(glareAvg));
+                vec3 veilingGlare = glareAvg * glareWeight * vec3(1.02, 0.99, 0.96) * 0.18;
 
-                // 2. Dynamic Range Compression & Highlight Clipping
-                float luma = luminance(baseColor);
-                vec3 mapped = clamp((baseColor - 0.5) * 1.26 + 0.5, 0.0, 1.0);
+                // 3. Narrow Dynamic Range Tone Curve (Deep Toe Crush + Smooth Filmic Highlight Shoulder)
+                float luma = luminance(softColor);
 
-                // Crush shadow detail below 0.12 luminance
-                float shadowCrush = 1.0 - smoothstep(0.04, 0.14, luma);
-                mapped = mix(mapped, mapped * 0.36, shadowCrush);
+                // Toe curve: drop deep shadows & foliage into moody charcoal without flat black clipping
+                float toeFactor = mix(0.48, 1.0, smoothstep(0.02, 0.36, luma));
+                vec3 mapped = softColor * toeFactor;
 
-                // Subtle magenta/pink sensor overload fringe right at the 0.72..0.83 clipping knee
-                float fringeMask = smoothstep(0.68, 0.76, luma) * (1.0 - smoothstep(0.77, 0.85, luma));
-                mapped += vec3(0.14, -0.04, 0.11) * fringeMask;
+                // Midtone contrast S-curve
+                mapped = clamp((mapped - 0.46) * 1.18 + 0.46, 0.0, 1.0);
 
-                // Hard-clip highlights above 0.78 luminance to pure white
-                float clipWhite = smoothstep(0.74, 0.79, luma);
-                mapped = mix(mapped, vec3(1.0), clipWhite);
-
-                mapped = clamp(mapped + halation, 0.0, 1.0);
-
-                // 3. 2009 White Balance & Color Matrix: warm creamy/yellowish-green midtones
+                // Gentle highlight roll-off above 0.68 luma toward creamy white (no harsh magenta threshold fringe)
                 float postLuma = luminance(mapped);
-                float midtoneWeight = clamp(4.0 * postLuma * (1.0 - postLuma), 0.0, 1.0);
-                vec3 colorTint = mix(vec3(1.02, 1.01, 0.93), vec3(1.06, 1.02, 0.88), midtoneWeight);
-                mapped *= colorTint;
+                float shoulder = smoothstep(0.68, 0.96, postLuma);
+                vec3 creamyWhite = vec3(0.99, 0.985, 0.965);
+                mapped = mix(mapped, creamyWhite, shoulder * 0.78);
 
-                float sat = mix(0.64, 1.08, smoothstep(0.06, 0.38, postLuma));
+                // Blend soft optical veiling glare
+                mapped = clamp(mapped + veilingGlare * (1.0 - shoulder * 0.5), 0.0, 1.0);
+
+                // 4. Authentic iPhone 3GS Color Matrix:
+                // - Subtle cool-plum charcoal shadows (like 3GS backlit mountains)
+                // - Warm earthy/olive-golden midtones (2009 CMOS warmth)
+                // - Slightly muted milky highlights
+                float finalLuma = luminance(mapped);
+                float shadowW = 1.0 - smoothstep(0.0, 0.28, finalLuma);
+                float highW = smoothstep(0.62, 1.0, finalLuma);
+                float midW = clamp(1.0 - shadowW - highW, 0.0, 1.0);
+
+                vec3 shadowTint = vec3(0.97, 0.95, 1.01);
+                vec3 midTint = vec3(1.04, 1.00, 0.91);
+                vec3 highTint = vec3(1.01, 1.00, 0.97);
+                mapped *= (shadowTint * shadowW + midTint * midW + highTint * highW);
+
+                // Desaturate deep shadows and bright skies gently; keep midtones warm & natural
+                float sat = mix(0.58, 0.94, smoothstep(0.05, 0.35, finalLuma))
+                          * mix(1.0, 0.68, smoothstep(0.68, 0.96, finalLuma));
                 mapped = mix(vec3(luminance(mapped)), mapped, sat);
 
-                // 5. Subtle low-frequency time-varying chroma noise in dark areas (< 0.25 luma)
-                float darkNoiseMask = 1.0 - smoothstep(0.04, 0.25, postLuma);
-                vec2 noiseCell = floor(vRawUv * vec2(320.0, 240.0));
-                float tSeed = floor(uTime * 24.0);
-                float nR = hash12(noiseCell + vec2(tSeed * 1.3, 17.1)) - 0.5;
-                float nG = hash12(noiseCell + vec2(tSeed * 2.1, 53.7)) - 0.5;
-                float nB = hash12(noiseCell + vec2(tSeed * 3.7, 91.3)) - 0.5;
-                mapped += vec3(nR, nG, nB) * 0.11 * darkNoiseMask;
+                // 5. Fine-Pitch 2009 CMOS Grain in Shadow Regions (< 0.30 luma)
+                float noiseMask = 1.0 - smoothstep(0.03, 0.30, finalLuma);
+                vec2 grainCell = floor(vRawUv * vec2(960.0, 720.0));
+                float tSeed = floor(uTime * 18.0);
+                float lumaGrain = (hash12(grainCell + vec2(tSeed * 1.7, 13.3)) - 0.5) * 0.036;
+                float cR = (hash12(grainCell + vec2(tSeed * 2.3, 41.9)) - 0.5) * 0.020;
+                float cB = (hash12(grainCell + vec2(tSeed * 3.1, 79.1)) - 0.5) * 0.020;
+                mapped += vec3(lumaGrain + cR, lumaGrain, lumaGrain + cB) * noiseMask;
 
-                float vignette = 1.0 - dot(radial, radial) * 0.28;
-                mapped *= clamp(vignette, 0.78, 1.0);
+                // Subtle miniature f/2.8 lens corner vignette
+                float vignette = 1.0 - edgeDist * 0.34;
+                mapped *= clamp(vignette, 0.72, 1.0);
 
                 gl_FragColor = vec4(clamp(mapped, 0.0, 1.0), 1.0);
             }

@@ -288,7 +288,7 @@ class CameraEngine(
         Camera2Interop.Extender(previewBuilder).apply {
             setCaptureRequestOption(
                 CaptureRequest.CONTROL_AE_ANTIBANDING_MODE,
-                CaptureRequest.CONTROL_AE_ANTIBANDING_MODE_OFF,
+                CaptureRequest.CONTROL_AE_ANTIBANDING_MODE_AUTO,
             )
             setCaptureRequestOption(
                 CaptureRequest.CONTROL_SCENE_MODE,
@@ -304,7 +304,7 @@ class CameraEngine(
             )
             setCaptureRequestOption(
                 CaptureRequest.NOISE_REDUCTION_MODE,
-                CaptureRequest.NOISE_REDUCTION_MODE_OFF,
+                CaptureRequest.NOISE_REDUCTION_MODE_FAST,
             )
         }
 
@@ -326,12 +326,12 @@ class CameraEngine(
             val boundCamera = provider.bindToLifecycle(owner, selector, preview)
             camera = boundCamera
 
-            // Apply positive exposure compensation (+1.2 EV) for authentic 2009 sky blowout
+            // Subtle +0.2 EV bias: keeps indoor scenes balanced while allowing shader shoulder to bloom skies
             val exposureState = boundCamera.cameraInfo.exposureState
             if (exposureState.isExposureCompensationSupported) {
                 val step = exposureState.exposureCompensationStep.toFloat()
                 if (step > 0f) {
-                    val targetIdx = (1.2f / step).roundToInt().coerceIn(
+                    val targetIdx = (0.2f / step).roundToInt().coerceIn(
                         exposureState.exposureCompensationRange.lower,
                         exposureState.exposureCompensationRange.upper,
                     )
